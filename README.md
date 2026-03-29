@@ -35,6 +35,8 @@ Quipay is a decentralized payroll protocol enabling **continuous salary streamin
 ### For Employers
 
 - **Continuous Payment Streams** - Set up recurring salaries that accrue per second
+- **Stream Cancellation** - Cancel active streams anytime with automated prorated payouts
+- **Direct Treasury Deposits** - Easily fund your payroll vault from the interface
 - **Treasury Solvency Management** - Automatic balance verification prevents overspending
 - **Multi-Token Support** - Pay in XLM, USDC, or any Stellar asset
 - **AI Automation** - Intelligent agents handle payroll scheduling and treasury optimization
@@ -45,6 +47,7 @@ Quipay is a decentralized payroll protocol enabling **continuous salary streamin
 - **Instant Access** - Withdraw earned salary anytime, no waiting for payday
 - **Real-Time Earnings** - See your balance grow every second
 - **Flexible Withdrawals** - Partial or full payouts on demand
+- **Stream History Timeline** - Interactive visual timeline of your stream lifecycle
 - **Multi-Stream Support** - Manage multiple income sources in one place
 - **Payment History** - Complete transaction transparency
 
@@ -179,6 +182,22 @@ To enable preview deployments:
    - Build the dApp with `PUBLIC_STELLAR_*` env vars set to Testnet endpoints.
    - Deploy a per-PR preview to Cloudflare Pages.
    - **Comment on the PR with the preview URL** so reviewers can visually test the changes.
+
+---
+
+## ⚙️ Environment Variables
+
+The frontend reads the following environment variables at build time. Copy `.env.example` to `.env` and adjust as needed:
+
+| Variable                     | Default                     | Description                                                   |
+| ---------------------------- | --------------------------- | ------------------------------------------------------------- |
+| `PUBLIC_STELLAR_NETWORK`     | `LOCAL`                     | Stellar network to connect to (`LOCAL`, `TESTNET`, `MAINNET`) |
+| `PUBLIC_STELLAR_RPC_URL`     | `http://localhost:8000/rpc` | Soroban RPC endpoint                                          |
+| `PUBLIC_STELLAR_HORIZON_URL` | `http://localhost:8000`     | Stellar Horizon endpoint                                      |
+| `VITE_SITE_URL`              | `https://quipay.app`        | Canonical site URL for metadata                               |
+| `VITE_API_BASE_URL`          | `http://localhost:3001`     | Backend API base URL used by frontend hooks (e.g. analytics)  |
+
+> **Docker Compose:** When running via `docker compose up`, `VITE_API_BASE_URL` is set automatically in the frontend service configuration. See `docker-compose.yml` for defaults.
 
 ---
 

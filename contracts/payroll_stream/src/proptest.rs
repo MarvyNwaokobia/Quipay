@@ -1,9 +1,10 @@
 #![cfg(test)]
 extern crate std;
 
-use crate::{PayrollStream, PayrollStreamClient, Stream, StreamStatus};
+use crate::{PayrollStream, PayrollStreamClient, Stream, StreamStatus, stream_curve::SpeedCurve};
 use proptest::prelude::*;
 use soroban_sdk::{Address, Env, testutils::Address as _, testutils::Ledger};
+use crate::stream_curve::SpeedCurve::Linear;
 
 mod dummy_vault {
     use soroban_sdk::{Address, Env, contract, contractimpl};
@@ -52,7 +53,9 @@ proptest! {
         let vault_id = env.register_contract(None, dummy_vault::DummyVault);
 
         client.init(&admin);
+        client.set_min_stream_duration(&0u64);
         client.set_vault(&vault_id);
+        client.set_cancellation_grace_period(&0u64); // disable grace period for prop tests
 
         let initial_time = 1_000_000_000u64;
         env.ledger().set_timestamp(initial_time);
@@ -60,7 +63,7 @@ proptest! {
         let start_ts = initial_time.saturating_add(start_offset);
         let end_ts = start_ts.saturating_add(duration);
 
-        let stream_id = client.create_stream(&employer, &worker, &token, &rate, &0u64, &start_ts, &end_ts);
+        let stream_id = client.create_stream(&employer, &worker, &token, &rate, &0u64, &start_ts, &end_ts, &None, &None);
 
         let mut current_time = initial_time;
         let steps = std::cmp::min(time_leaps.len(), actions.len());
@@ -337,5 +340,82 @@ fn construct_stream(
         status,
         created_at: start_ts.saturating_sub(100),
         closed_at,
+        paused_at: 0,
+        total_paused_duration: 0,
+        metadata_hash: None,
+        cancel_effective_at: 0,
+        speed_curve: SpeedCurve::Linear,
+    }
+}
+
+#[test]
+#[ignore = "fuzz-style coverage for streamed amount edge cases"]
+fn fuzz_compute_streamed_edge_cases() {
+    let env = Env::default();
+    let start_ts = 1_700_000_000u64;
+    let mut seed = 0xDEADBEEFCAFEBABEu64;
+
+    for _ in 0..10_000 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let total_amount = ((seed >> 1) % 1_000_000_000u64) as i128;
+
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let duration = seed % 10_000u64;
+
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let query_offset = seed % (duration.saturating_add(5_001));
+
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let mut t1_offset = seed % (duration.saturating_add(1));
+
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let mut t2_offset = seed % (duration.saturating_add(1));
+
+        if t1_offset > t2_offset {
+            core::mem::swap(&mut t1_offset, &mut t2_offset);
+        }
+
+        let end_ts = start_ts.saturating_add(duration);
+        let stream = construct_stream(
+            &env,
+            start_ts,
+            end_ts,
+            0,
+            total_amount,
+            StreamStatus::Active,
+            0,
+        );
+
+        let streamed_at_query =
+            PayrollStream::vested_amount_at(&stream, start_ts.saturating_add(query_offset));
+        let streamed_at_end = PayrollStream::vested_amount_at(&stream, end_ts);
+        let streamed_t1 =
+            PayrollStream::vested_amount_at(&stream, start_ts.saturating_add(t1_offset));
+        let streamed_t2 =
+            PayrollStream::vested_amount_at(&stream, start_ts.saturating_add(t2_offset));
+
+        assert!(
+            streamed_at_query <= total_amount,
+            "streamed amount exceeded total: streamed={}, total={}, duration={}, query_offset={}",
+            streamed_at_query,
+            total_amount,
+            duration,
+            query_offset
+        );
+        assert_eq!(
+            streamed_at_end, total_amount,
+            "streamed amount at end should equal total: total={}, duration={}",
+            total_amount, duration
+        );
+        assert!(
+            streamed_t1 <= streamed_t2,
+            "streamed amount must be monotonic: t1={}, t2={}, streamed_t1={}, streamed_t2={}, duration={}, total={}",
+            t1_offset,
+            t2_offset,
+            streamed_t1,
+            streamed_t2,
+            duration,
+            total_amount
+        );
     }
 }

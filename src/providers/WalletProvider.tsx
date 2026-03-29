@@ -7,9 +7,10 @@ import {
   useState,
   useTransition,
 } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { wallet } from "../util/wallet";
 import storage from "../util/storage";
-import { fetchBalances } from "../util/wallet";
+import { fetchBalances, disconnectWallet } from "../util/wallet";
 import type { MappedBalances } from "../util/wallet";
 
 const signTransaction = wallet.signTransaction.bind(wallet);
@@ -46,6 +47,7 @@ export interface WalletContextType {
   updateBalances: () => Promise<void>;
   connectionError?: string;
   clearError: () => void;
+  disconnect: () => Promise<void>;
 }
 
 const POLL_INTERVAL = 1000;
@@ -57,18 +59,42 @@ export const WalletContext = // eslint-disable-line react-refresh/only-export-co
     updateBalances: async () => {},
     signTransaction,
     clearError: () => {},
+    disconnect: async () => {},
   });
 
 export const WalletProvider = ({ children }: { children: React.ReactNode }) => {
+  const queryClient = useQueryClient();
   const [balances, setBalances] = useState<MappedBalances>({});
-  const [address, setAddress] = useState<string>();
-  const [network, setNetwork] = useState<string>();
-  const [networkPassphrase, setNetworkPassphrase] = useState<string>();
+  // const [address, setAddress] = useState<string>();
+  // const [network, setNetwork] = useState<string>();
+  // const [networkPassphrase, setNetworkPassphrase] = useState<string>();
+
+  const [address, setAddress] = useState<string | undefined>(() => {
+    const stored = storage.getItem("walletAddress");
+    return stored || undefined;
+  });
+  const [network, setNetwork] = useState<string | undefined>(() => {
+    const stored = storage.getItem("walletNetwork");
+    return stored || undefined;
+  });
+  const [networkPassphrase, setNetworkPassphrase] = useState<
+    string | undefined
+  >(() => {
+    const stored = storage.getItem("networkPassphrase");
+    return stored || undefined;
+  });
   const [isPending, startTransition] = useTransition();
   const [connectionError, setConnectionError] = useState<string | undefined>();
   const popupLock = useRef(false);
 
   const clearError = useCallback(() => setConnectionError(undefined), []);
+
+  const disconnect = useCallback(async () => {
+    await disconnectWallet();
+    // Clear all cached queries to remove any contract client data
+    queryClient.clear();
+    nullify();
+  }, [queryClient]);
 
   const nullify = () => {
     setAddress(undefined);
@@ -207,6 +233,7 @@ export const WalletProvider = ({ children }: { children: React.ReactNode }) => {
       signTransaction,
       connectionError,
       clearError,
+      disconnect,
     }),
     [
       address,
@@ -217,6 +244,7 @@ export const WalletProvider = ({ children }: { children: React.ReactNode }) => {
       isPending,
       connectionError,
       clearError,
+      disconnect,
     ],
   );
 

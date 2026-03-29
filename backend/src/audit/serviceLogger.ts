@@ -1,5 +1,21 @@
 import { getAuditLogger, isAuditLoggerInitialized } from "./init";
 import { LogContext } from "./types";
+import { requestContext } from "../middleware/requestId";
+
+function enrichContext(context: LogContext = {}): LogContext {
+  const store = requestContext.getStore();
+  if (!store) return context;
+
+  const enriched: LogContext = { ...context };
+
+  if (store.requestId) enriched.request_id = store.requestId;
+  if (store.correlationId) enriched.correlation_id = store.correlationId;
+  if (store.walletAddress) enriched.wallet_address = store.walletAddress;
+  if (store.method) enriched.method = store.method;
+  if (store.path) enriched.path = store.path;
+
+  return enriched;
+}
 
 function formatFallbackMessage(service: string, message: string): string {
   return `[${service}] ${message}`;
@@ -23,15 +39,16 @@ export async function logServiceInfo(
   context: LogContext = {},
 ): Promise<void> {
   try {
+    const enrichedContext = enrichContext(context);
     if (!isAuditLoggerInitialized()) {
-      console.log(formatFallbackMessage(service, message), context);
+      console.log(formatFallbackMessage(service, message), enrichedContext);
       return;
     }
 
     await getAuditLogger().info(message, {
       action_type: "system",
       service,
-      ...context,
+      ...enrichedContext,
     });
   } catch (error) {
     console.error(formatFallbackMessage(service, message), error);
@@ -44,15 +61,16 @@ export async function logServiceWarn(
   context: LogContext = {},
 ): Promise<void> {
   try {
+    const enrichedContext = enrichContext(context);
     if (!isAuditLoggerInitialized()) {
-      console.warn(formatFallbackMessage(service, message), context);
+      console.warn(formatFallbackMessage(service, message), enrichedContext);
       return;
     }
 
     await getAuditLogger().warn(message, {
       action_type: "system",
       service,
-      ...context,
+      ...enrichedContext,
     });
   } catch (error) {
     console.error(formatFallbackMessage(service, message), error);
@@ -68,15 +86,20 @@ export async function logServiceError(
   const normalizedError = normalizeError(error);
 
   try {
+    const enrichedContext = enrichContext(context);
     if (!isAuditLoggerInitialized()) {
-      console.error(formatFallbackMessage(service, message), normalizedError);
+      console.error(
+        formatFallbackMessage(service, message),
+        normalizedError,
+        enrichedContext,
+      );
       return;
     }
 
     await getAuditLogger().error(message, normalizedError, {
       action_type: "system",
       service,
-      ...context,
+      ...enrichedContext,
     });
   } catch (logError) {
     console.error(formatFallbackMessage(service, message), normalizedError);
@@ -86,3 +109,9 @@ export async function logServiceError(
     );
   }
 }
+
+export const serviceLogger = {
+  info: logServiceInfo,
+  warn: logServiceWarn,
+  error: logServiceError,
+};

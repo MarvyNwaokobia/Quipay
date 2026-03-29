@@ -39,6 +39,23 @@ export interface VaultEventRecord {
   created_at: Date;
 }
 
+export type EmployerVerificationStatus = "pending" | "verified" | "rejected";
+
+export interface EmployerRecord {
+  employer_id: string;
+  business_name: string;
+  registration_number: string;
+  country_code: string;
+  contact_name: string | null;
+  contact_email: string | null;
+  verification_status: EmployerVerificationStatus;
+  verification_reason: string | null;
+  verification_metadata: Record<string, unknown>;
+  verified_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
 export interface TrendPoint {
   bucket: string; // ISO date string
   volume: string; // total amount in that period
@@ -53,6 +70,29 @@ export interface OverallStats {
   cancelled_streams: number;
   total_volume: string;
   total_withdrawn: string;
+}
+
+export interface EmployerPayrollSummary {
+  total_streams: number;
+  active_streams: number;
+  completed_streams: number;
+  cancelled_streams: number;
+  total_disbursed: string;
+}
+
+export interface EmployerMonthlyPayrollPoint {
+  month: string;
+  payroll_volume: string;
+}
+
+export interface EmployerWorkerPayrollBreakdown {
+  worker: string;
+  stream_count: number;
+  active_streams: number;
+  completed_streams: number;
+  cancelled_streams: number;
+  total_allocated: string;
+  total_disbursed: string;
 }
 
 export interface PayrollSchedule {
@@ -96,6 +136,16 @@ export interface WebhookOutboundEventRecord {
   last_attempt_at: Date | null;
   created_at: Date;
   updated_at: Date;
+}
+
+export interface PayrollProofRecord {
+  id: number;
+  stream_id: number;
+  cid: string;
+  ipfs_url: string;
+  gateway_url: string;
+  proof_json: unknown;
+  created_at: Date;
 }
 
 // ─── Cursor helpers (for sync worker) ───────────────────────────────────────
@@ -168,6 +218,7 @@ export const upsertStream = async (params: {
   globalCache.invalidateByPrefix("analytics:trends:");
   globalCache.del(`analytics:address:${params.employer}`);
   globalCache.del(`analytics:address:${params.worker}`);
+  globalCache.invalidateByPrefix(`analytics:payroll:${params.employer}:`);
 };
 
 export const recordWithdrawal = async (params: {
@@ -193,6 +244,10 @@ export const recordWithdrawal = async (params: {
   // Invalidate worker analytics cache
   globalCache.del(`analytics:address:${params.worker}`);
   globalCache.del("analytics:summary"); // total withdrawn changes
+  const stream = await getStreamById(params.streamId);
+  if (stream) {
+    globalCache.invalidateByPrefix(`analytics:payroll:${stream.employer}:`);
+  }
 };
 
 export const recordVaultEvent = async (params: {
@@ -230,6 +285,7 @@ export const getOverallStats = async (): Promise<OverallStats> => {
             COALESCE(SUM(total_amount),    0)              AS total_volume,
             COALESCE(SUM(withdrawn_amount),0)              AS total_withdrawn
         FROM payroll_streams
+        WHERE deleted_at IS NULL
     `);
   const row = res.rows[0];
   return {
@@ -242,21 +298,107 @@ export const getOverallStats = async (): Promise<OverallStats> => {
   };
 };
 
+export const getEmployerPayrollSummary = async (
+  employer: string,
+): Promise<EmployerPayrollSummary> => {
+  const res = await query<EmployerPayrollSummary>(
+    `SELECT
+        COUNT(*)                                      AS total_streams,
+        COUNT(*) FILTER (WHERE status = 'active')     AS active_streams,
+        COUNT(*) FILTER (WHERE status = 'completed')  AS completed_streams,
+        COUNT(*) FILTER (WHERE status = 'cancelled')  AS cancelled_streams,
+        COALESCE(SUM(withdrawn_amount), 0)            AS total_disbursed
+      FROM payroll_streams
+      WHERE employer = $1`,
+    [employer],
+  );
+
+  const row = res.rows[0];
+  return {
+    total_streams: Number(row?.total_streams ?? 0),
+    active_streams: Number(row?.active_streams ?? 0),
+    completed_streams: Number(row?.completed_streams ?? 0),
+    cancelled_streams: Number(row?.cancelled_streams ?? 0),
+    total_disbursed: row?.total_disbursed ?? "0",
+  };
+};
+
+export const getEmployerPayrollMonthly = async (
+  employer: string,
+): Promise<EmployerMonthlyPayrollPoint[]> => {
+  const res = await query<EmployerMonthlyPayrollPoint>(
+    `WITH months AS (
+        SELECT generate_series(
+          date_trunc('month', NOW()) - interval '11 months',
+          date_trunc('month', NOW()),
+          interval '1 month'
+        ) AS month_start
+      )
+      SELECT
+        to_char(months.month_start, 'YYYY-MM') AS month,
+        COALESCE(SUM(w.amount), 0)             AS payroll_volume
+      FROM months
+      LEFT JOIN payroll_streams s
+        ON s.employer = $1
+      LEFT JOIN withdrawals w
+        ON w.stream_id = s.stream_id
+       AND date_trunc('month', to_timestamp(w.ledger_ts)) = months.month_start
+      GROUP BY months.month_start
+      ORDER BY months.month_start ASC`,
+    [employer],
+  );
+
+  return res.rows;
+};
+
+export const getEmployerPayrollByWorker = async (
+  employer: string,
+): Promise<EmployerWorkerPayrollBreakdown[]> => {
+  const res = await query<EmployerWorkerPayrollBreakdown>(
+    `SELECT
+        worker,
+        COUNT(*)                                     AS stream_count,
+        COUNT(*) FILTER (WHERE status = 'active')    AS active_streams,
+        COUNT(*) FILTER (WHERE status = 'completed') AS completed_streams,
+        COUNT(*) FILTER (WHERE status = 'cancelled') AS cancelled_streams,
+        COALESCE(SUM(total_amount), 0)               AS total_allocated,
+        COALESCE(SUM(withdrawn_amount), 0)           AS total_disbursed
+      FROM payroll_streams
+      WHERE employer = $1
+      GROUP BY worker
+      ORDER BY worker ASC`,
+    [employer],
+  );
+
+  return res.rows.map((row) => ({
+    worker: row.worker,
+    stream_count: Number(row.stream_count),
+    active_streams: Number(row.active_streams),
+    completed_streams: Number(row.completed_streams),
+    cancelled_streams: Number(row.cancelled_streams),
+    total_allocated: row.total_allocated,
+    total_disbursed: row.total_disbursed,
+  }));
+};
+
 export const getStreamsByEmployer = async (
   employer: string,
   status?: string,
   limit = 50,
   offset = 0,
+  includeDeleted = false,
 ): Promise<StreamRecord[]> => {
   const params: unknown[] = [employer, limit, offset];
-  let statusClause = "";
+  const clauses: string[] = [];
+  if (!includeDeleted) clauses.push("deleted_at IS NULL");
   if (status) {
     params.push(status);
-    statusClause = `AND status = $${params.length}`;
+    clauses.push(`status = $${params.length}`);
   }
+  const whereExtra = clauses.length ? `AND ${clauses.join(" AND ")}` : "";
   const res = await query<StreamRecord>(
     `SELECT * FROM payroll_streams
-         WHERE employer = $1 ${statusClause}
+         WHERE employer = $1 ${whereExtra}
          ORDER BY created_at DESC
          LIMIT $2 OFFSET $3`,
     params,
@@ -269,16 +411,19 @@ export const getStreamsByWorker = async (
   status?: string,
   limit = 50,
   offset = 0,
+  includeDeleted = false,
 ): Promise<StreamRecord[]> => {
   const params: unknown[] = [worker, limit, offset];
-  let statusClause = "";
+  const clauses: string[] = [];
+  if (!includeDeleted) clauses.push("deleted_at IS NULL");
   if (status) {
     params.push(status);
-    statusClause = `AND status = $${params.length}`;
+    clauses.push(`status = $${params.length}`);
   }
+  const whereExtra = clauses.length ? `AND ${clauses.join(" AND ")}` : "";
   const res = await query<StreamRecord>(
     `SELECT * FROM payroll_streams
-         WHERE worker = $1 ${statusClause}
+         WHERE worker = $1 ${whereExtra}
          ORDER BY created_at DESC
          LIMIT $2 OFFSET $3`,
     params,
@@ -524,12 +669,106 @@ export interface MonitorLogEntry {
   created_at: Date;
 }
 
+export interface WorkerNotificationSettingsRecord {
+  worker: string;
+  email_enabled: boolean;
+  in_app_enabled: boolean;
+  cliff_unlock_alerts: boolean;
+  stream_ending_alerts: boolean;
+  low_runway_alerts: boolean;
+  created_at: Date;
+  updated_at: Date;
+}
+
 export const getTreasuryBalances = async (): Promise<TreasuryBalance[]> => {
   if (!getPool()) return [];
   const res = await query<TreasuryBalance>(
     `SELECT employer, balance, token, updated_at FROM treasury_balances`,
   );
   return res.rows;
+};
+
+export const getTreasuryBalanceByEmployer = async (
+  employer: string,
+): Promise<TreasuryBalance | null> => {
+  if (!getPool()) return null;
+  const res = await query<TreasuryBalance>(
+    `SELECT employer, balance, token, updated_at
+      FROM treasury_balances
+      WHERE employer = $1`,
+    [employer],
+  );
+  return res.rows[0] ?? null;
+};
+
+export const getEmployerById = async (
+  employerId: string,
+): Promise<EmployerRecord | null> => {
+  if (!getPool()) return null;
+  const res = await query<EmployerRecord>(
+    `SELECT * FROM employers WHERE employer_id = $1`,
+    [employerId],
+  );
+  return res.rows[0] ?? null;
+};
+
+export const upsertEmployerVerification = async (params: {
+  employerId: string;
+  businessName: string;
+  registrationNumber: string;
+  countryCode: string;
+  contactName?: string;
+  contactEmail?: string;
+  verificationStatus: EmployerVerificationStatus;
+  verificationReason: string | null;
+  verificationMetadata: Record<string, unknown>;
+}): Promise<EmployerRecord> => {
+  if (!getPool()) {
+    throw new Error("Database not configured");
+  }
+
+  const res = await query<EmployerRecord>(
+    `INSERT INTO employers (
+        employer_id,
+        business_name,
+        registration_number,
+        country_code,
+        contact_name,
+        contact_email,
+        verification_status,
+        verification_reason,
+        verification_metadata,
+        verified_at,
+        updated_at
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW())
+      ON CONFLICT (employer_id) DO UPDATE
+        SET business_name = EXCLUDED.business_name,
+            registration_number = EXCLUDED.registration_number,
+            country_code = EXCLUDED.country_code,
+            contact_name = EXCLUDED.contact_name,
+            contact_email = EXCLUDED.contact_email,
+            verification_status = EXCLUDED.verification_status,
+            verification_reason = EXCLUDED.verification_reason,
+            verification_metadata = EXCLUDED.verification_metadata,
+            verified_at = EXCLUDED.verified_at,
+            updated_at = NOW()
+      RETURNING *`,
+    [
+      params.employerId,
+      params.businessName,
+      params.registrationNumber,
+      params.countryCode,
+      params.contactName ?? null,
+      params.contactEmail ?? null,
+      params.verificationStatus,
+      params.verificationReason,
+      params.verificationMetadata,
+      params.verificationStatus === "verified" ? new Date() : null,
+    ],
+  );
+
+  return res.rows[0];
 };
 
 export const getActiveLiabilities = async (): Promise<TreasuryLiability[]> => {
@@ -582,6 +821,7 @@ export const updateTreasuryBalance = async (
                updated_at = NOW()`,
     [employer, balance.toString(), token],
   );
+  globalCache.invalidateByPrefix(`analytics:payroll:${employer}:`);
 };
 
 export const getMonitorLogs = async (
@@ -602,6 +842,49 @@ export const getMonitorLogs = async (
     [limit],
   );
   return res.rows;
+};
+
+export const getWorkerNotificationSettings = async (
+  worker: string,
+): Promise<WorkerNotificationSettingsRecord | null> => {
+  if (!getPool()) return null;
+  const res = await query<WorkerNotificationSettingsRecord>(
+    `SELECT * FROM worker_notification_settings WHERE worker = $1`,
+    [worker],
+  );
+  return res.rows[0] ?? null;
+};
+
+export const upsertWorkerNotificationSettings = async (params: {
+  worker: string;
+  emailEnabled: boolean;
+  inAppEnabled: boolean;
+  cliffUnlockAlerts: boolean;
+  streamEndingAlerts: boolean;
+  lowRunwayAlerts: boolean;
+}): Promise<void> => {
+  if (!getPool()) return;
+  await query(
+    `INSERT INTO worker_notification_settings
+      (worker, email_enabled, in_app_enabled, cliff_unlock_alerts, stream_ending_alerts, low_runway_alerts, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, NOW())
+     ON CONFLICT (worker)
+     DO UPDATE SET
+       email_enabled = EXCLUDED.email_enabled,
+       in_app_enabled = EXCLUDED.in_app_enabled,
+       cliff_unlock_alerts = EXCLUDED.cliff_unlock_alerts,
+       stream_ending_alerts = EXCLUDED.stream_ending_alerts,
+       low_runway_alerts = EXCLUDED.low_runway_alerts,
+       updated_at = NOW()`,
+    [
+      params.worker,
+      params.emailEnabled,
+      params.inAppEnabled,
+      params.cliffUnlockAlerts,
+      params.streamEndingAlerts,
+      params.lowRunwayAlerts,
+    ],
+  );
 };
 
 // ─── Webhook outbound delivery logs ──────────────────────────────────────────
@@ -739,4 +1022,266 @@ export const listWebhookOutboundEventsByOwner = async (params: {
     [params.ownerId, params.limit, params.offset],
   );
   return res.rows;
+};
+
+// ─── Stream read by ID ────────────────────────────────────────────────────────
+
+export const getStreamById = async (
+  streamId: number,
+  includeSoftDeleted = false,
+): Promise<StreamRecord | null> => {
+  if (!getPool()) return null;
+  const deletedClause = includeSoftDeleted ? "" : "AND deleted_at IS NULL";
+  const res = await query<StreamRecord>(
+    `SELECT * FROM payroll_streams WHERE stream_id = $1 ${deletedClause}`,
+    [streamId],
+  );
+  return res.rows[0] ?? null;
+};
+
+// ─── Soft-delete helpers (issue #614) ────────────────────────────────────────
+
+export interface StreamAuditEntry {
+  id: number;
+  stream_id: number;
+  changed_by: string;
+  action: string;
+  old_status: string | null;
+  new_status: string | null;
+  reason: string | null;
+  metadata: Record<string, unknown>;
+  created_at: Date;
+}
+
+/**
+ * Soft-delete a stream by setting `deleted_at`, `deleted_by`, and
+ * `cancel_reason`.  Also appends an entry to `stream_audit_log`.
+ * Returns `false` when the stream does not exist or is already deleted.
+ */
+export const softDeleteStream = async (params: {
+  streamId: number;
+  deletedBy: string;
+  cancelReason?: string;
+}): Promise<boolean> => {
+  if (!getPool()) throw new Error("Database pool is not initialized");
+
+  const existing = await query<{ status: string; stream_id: string }>(
+    `SELECT stream_id, status FROM payroll_streams
+     WHERE stream_id = $1 AND deleted_at IS NULL`,
+    [params.streamId],
+  );
+
+  if (existing.rows.length === 0) return false;
+
+  const oldStatus = existing.rows[0].status;
+
+  await query(
+    `UPDATE payroll_streams
+     SET deleted_at    = NOW(),
+         deleted_by    = $2,
+         cancel_reason = $3,
+         status        = 'cancelled',
+         updated_at    = NOW()
+     WHERE stream_id = $1 AND deleted_at IS NULL`,
+    [params.streamId, params.deletedBy, params.cancelReason ?? null],
+  );
+
+  // Record the cancellation in the immutable audit log
+  await query(
+    `INSERT INTO stream_audit_log
+       (stream_id, changed_by, action, old_status, new_status, reason)
+     VALUES ($1, $2, 'cancelled', $3, 'cancelled', $4)`,
+    [params.streamId, params.deletedBy, oldStatus, params.cancelReason ?? null],
+  );
+
+  // Invalidate analytics cache
+  globalCache.del("analytics:summary");
+  globalCache.invalidateByPrefix("analytics:trends:");
+
+  return true;
+};
+
+/**
+ * Retrieve the full audit trail for a single stream.
+ */
+export const getStreamAuditLog = async (
+  streamId: number,
+): Promise<StreamAuditEntry[]> => {
+  if (!getPool()) return [];
+  const res = await query<StreamAuditEntry>(
+    `SELECT * FROM stream_audit_log WHERE stream_id = $1 ORDER BY created_at ASC`,
+    [streamId],
+  );
+  return res.rows;
+};
+
+// ─── Payroll proof queries ────────────────────────────────────────────────────
+
+export const insertPayrollProof = async (params: {
+  streamId: number;
+  cid: string;
+  ipfsUrl: string;
+  gatewayUrl: string;
+  proofJson: unknown;
+}): Promise<void> => {
+  if (!getPool()) return;
+  await query(
+    `INSERT INTO payroll_proofs (stream_id, cid, ipfs_url, gateway_url, proof_json)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (stream_id) DO NOTHING`,
+    [
+      params.streamId,
+      params.cid,
+      params.ipfsUrl,
+      params.gatewayUrl,
+      JSON.stringify(params.proofJson),
+    ],
+  );
+};
+
+export const getProofByStreamId = async (
+  streamId: number,
+): Promise<PayrollProofRecord | null> => {
+  if (!getPool()) return null;
+  const res = await query<PayrollProofRecord>(
+    `SELECT * FROM payroll_proofs WHERE stream_id = $1`,
+    [streamId],
+  );
+  return res.rows[0] ?? null;
+};
+
+// ─── Dashboard analytics queries ─────────────────────────────────────────────
+
+export interface VolumePoint {
+  bucket: string; // ISO date string (day or week)
+  xlm_volume: string;
+  usdc_volume: string;
+  total_volume: string;
+  stream_count: number;
+}
+
+export interface TopWorker {
+  worker: string;
+  total_earned: string;
+  stream_count: number;
+  last_withdrawal_at: string | null;
+}
+
+export interface StreamCreationPoint {
+  bucket: string;
+  streams_created: number;
+}
+
+export interface WithdrawalFrequencyPoint {
+  bucket: string;
+  withdrawal_count: number;
+  total_withdrawn: string;
+}
+
+/**
+ * Total XLM/USDC streamed per day or week.
+ * Uses vault_events for token-level breakdown; falls back to payroll_streams volume.
+ */
+export const getVolumeOverTime = async (
+  granularity: "daily" | "weekly" = "daily",
+  days = 30,
+): Promise<VolumePoint[]> => {
+  if (!getPool()) return [];
+  const trunc = granularity === "weekly" ? "week" : "day";
+  const res = await query<VolumePoint>(
+    `SELECT
+        date_trunc('${trunc}', created_at)::date::text          AS bucket,
+        COALESCE(SUM(total_amount) FILTER (
+          WHERE LOWER(worker) LIKE '%xlm%' OR LOWER(employer) LIKE '%xlm%'
+        ), 0)                                                    AS xlm_volume,
+        COALESCE(SUM(total_amount) FILTER (
+          WHERE LOWER(worker) NOT LIKE '%xlm%' AND LOWER(employer) NOT LIKE '%xlm%'
+        ), 0)                                                    AS usdc_volume,
+        COALESCE(SUM(total_amount), 0)                           AS total_volume,
+        COUNT(*)                                                 AS stream_count
+      FROM payroll_streams
+      WHERE deleted_at IS NULL
+        AND created_at >= NOW() - INTERVAL '${days} days'
+      GROUP BY 1
+      ORDER BY 1 ASC`,
+  );
+  return res.rows.map((r) => ({
+    ...r,
+    stream_count: Number(r.stream_count),
+  }));
+};
+
+/**
+ * Top workers ranked by total withdrawn amount.
+ */
+export const getTopWorkersByEarnings = async (
+  limit = 10,
+): Promise<TopWorker[]> => {
+  if (!getPool()) return [];
+  const res = await query<TopWorker>(
+    `SELECT
+        w.worker,
+        COALESCE(SUM(w.amount), 0)                              AS total_earned,
+        COUNT(DISTINCT w.stream_id)                             AS stream_count,
+        MAX(w.created_at)::text                                 AS last_withdrawal_at
+      FROM withdrawals w
+      GROUP BY w.worker
+      ORDER BY total_earned DESC
+      LIMIT $1`,
+    [limit],
+  );
+  return res.rows.map((r) => ({
+    ...r,
+    stream_count: Number(r.stream_count),
+  }));
+};
+
+/**
+ * Stream creation rate per day or week.
+ */
+export const getStreamCreationRate = async (
+  granularity: "daily" | "weekly" = "daily",
+  days = 30,
+): Promise<StreamCreationPoint[]> => {
+  if (!getPool()) return [];
+  const trunc = granularity === "weekly" ? "week" : "day";
+  const res = await query<StreamCreationPoint>(
+    `SELECT
+        date_trunc('${trunc}', created_at)::date::text  AS bucket,
+        COUNT(*)                                         AS streams_created
+      FROM payroll_streams
+      WHERE deleted_at IS NULL
+        AND created_at >= NOW() - INTERVAL '${days} days'
+      GROUP BY 1
+      ORDER BY 1 ASC`,
+  );
+  return res.rows.map((r) => ({
+    ...r,
+    streams_created: Number(r.streams_created),
+  }));
+};
+
+/**
+ * Withdrawal frequency per day or week.
+ */
+export const getWithdrawalFrequency = async (
+  granularity: "daily" | "weekly" = "daily",
+  days = 30,
+): Promise<WithdrawalFrequencyPoint[]> => {
+  if (!getPool()) return [];
+  const trunc = granularity === "weekly" ? "week" : "day";
+  const res = await query<WithdrawalFrequencyPoint>(
+    `SELECT
+        date_trunc('${trunc}', created_at)::date::text  AS bucket,
+        COUNT(*)                                         AS withdrawal_count,
+        COALESCE(SUM(amount), 0)                         AS total_withdrawn
+      FROM withdrawals
+      WHERE created_at >= NOW() - INTERVAL '${days} days'
+      GROUP BY 1
+      ORDER BY 1 ASC`,
+  );
+  return res.rows.map((r) => ({
+    ...r,
+    withdrawal_count: Number(r.withdrawal_count),
+  }));
 };
