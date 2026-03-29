@@ -90,8 +90,11 @@ pub fn raise_dispute(
             }
             // Previous dispute is resolved — allow a fresh one to be raised
         }
-        // Active, Paused, PendingCancel — all valid states to raise a dispute
-        StreamStatus::Active | StreamStatus::Paused | StreamStatus::PendingCancel => {}
+        // Active, Paused, PendingCancel, PendingApproval — all valid states to raise a dispute
+        StreamStatus::Active
+        | StreamStatus::Paused
+        | StreamStatus::PendingCancel
+        | StreamStatus::PendingApproval => {}
     }
 
     let now = env.ledger().timestamp();

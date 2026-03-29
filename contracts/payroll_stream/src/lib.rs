@@ -288,7 +288,6 @@ impl PayrollStream {
         Ok(())
     }
 
-<<<<<<< HEAD
     pub fn set_employer_approval_threshold(
         env: Env,
         employer: Address,
@@ -326,12 +325,9 @@ impl PayrollStream {
             .unwrap_or(0)
     }
 
-    pub fn set_vault(env: Env, vault: Address) {
-=======
     /// Set early cancellation fee as basis points (max 1000 = 10%)
     /// Only admin can call this function
     pub fn set_early_cancel_fee(env: Env, fee_bps: u32) -> Result<(), QuipayError> {
->>>>>>> origin/main
         let admin: Address = env
             .storage()
             .instance()
@@ -651,7 +647,6 @@ impl PayrollStream {
         Ok(stream_id)
     }
 
-<<<<<<< HEAD
     pub fn approve_stream(env: Env, stream_id: u64, approver: Address) -> Result<(), QuipayError> {
         Self::require_not_paused(&env)?;
         approver.require_auth();
@@ -740,11 +735,10 @@ impl PayrollStream {
         Ok(())
     }
 
-=======
     /// Creates multiple streams atomically and optionally deposits a lump sum into the vault.
     /// This is significantly more gas-efficient than calling create_stream individually
     /// as it groups vault interactions into single calls.
-    pub fn create_stream_batch(
+    pub fn batch_create_streams(
         env: Env,
         params: Vec<StreamParams>,
         vault_deposit: i128,
@@ -849,7 +843,26 @@ impl PayrollStream {
 
             env.storage().persistent().set(&StreamKey::Stream(stream_id), &stream);
             created_ids.push_back(stream_id);
-            
+
+            // Update employer and worker stream index entries
+            let emp_key = StreamKey::EmployerStreams(authorized_employer.clone());
+            let mut emp_ids: Vec<u64> = env
+                .storage()
+                .persistent()
+                .get(&emp_key)
+                .unwrap_or_else(|| Vec::new(&env));
+            emp_ids.push_back(stream_id);
+            env.storage().persistent().set(&emp_key, &emp_ids);
+
+            let wrk_key = StreamKey::WorkerStreams(param.worker.clone());
+            let mut wrk_ids: Vec<u64> = env
+                .storage()
+                .persistent()
+                .get(&wrk_key)
+                .unwrap_or_else(|| Vec::new(&env));
+            wrk_ids.push_back(stream_id);
+            env.storage().persistent().set(&wrk_key, &wrk_ids);
+
             // Emit individual events for downstream indexers
             env.events().publish(
                 (Symbol::new(&env, "stream"), Symbol::new(&env, "created"), param.worker.clone(), authorized_employer.clone()),
@@ -867,7 +880,6 @@ impl PayrollStream {
     /// - If a stream is paused, vesting stops at the `paused_at` timestamp.
     /// - The worker can still withdraw any amount that was vested up to the pause time.
     /// - The available amount is calculated as `vested_at(paused_at) - withdrawn_amount`.
->>>>>>> origin/main
     pub fn withdraw(env: Env, stream_id: u64, worker: Address) -> Result<i128, QuipayError> {
         Self::require_not_paused(&env)?;
         worker.require_auth();
@@ -2084,16 +2096,14 @@ impl PayrollStream {
         wrk_ids.push_back(stream_id);
         env.storage().persistent().set(&wrk_key, &wrk_ids);
 
-<<<<<<< HEAD
         let event_name = if status == StreamStatus::PendingApproval {
             Symbol::new(&env, "pending_approval")
         } else {
             Symbol::new(&env, "created_via_gateway")
         };
-=======
+
         // Keep the new stream state and its worker index entry alive.
         Self::bump_stream_storage_ttl(&env, stream_id, &worker);
->>>>>>> origin/main
 
         env.events().publish(
             (
