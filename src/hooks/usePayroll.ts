@@ -8,6 +8,7 @@ export interface Stream {
   tokenSymbol: string;
   startDate: string;
   totalStreamed: string;
+  status: "active" | "completed" | "cancelled" | "pending_approval";
 }
 
 export interface TokenBalance {
@@ -19,6 +20,7 @@ export const usePayroll = () => {
   const [treasuryBalances, setTreasuryBalances] = useState<TokenBalance[]>([]);
   const [totalLiabilities, setTotalLiabilities] = useState<string>("0");
   const [activeStreams, setActiveStreams] = useState<Stream[]>([]);
+  const [pendingStreams, setPendingStreams] = useState<Stream[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
   useEffect(() => {
@@ -35,7 +37,7 @@ export const usePayroll = () => {
 
       setTotalLiabilities("1200.00 USDC"); // Simplified for now
 
-      setActiveStreams([
+      const allStreams: Stream[] = [
         {
           id: "1",
           employeeName: "Alice Smith",
@@ -44,6 +46,7 @@ export const usePayroll = () => {
           tokenSymbol: "USDC",
           startDate: "2023-10-01",
           totalStreamed: "450.00",
+          status: "active",
         },
         {
           id: "2",
@@ -53,8 +56,24 @@ export const usePayroll = () => {
           tokenSymbol: "XLM",
           startDate: "2023-10-15",
           totalStreamed: "900.00",
+          status: "active",
         },
-      ]);
+        {
+          id: "3",
+          employeeName: "Charlie Brown",
+          employeeAddress: "GCDE...456",
+          flowRate: "0.05",
+          tokenSymbol: "USDC",
+          startDate: "2026-03-29",
+          totalStreamed: "0.00",
+          status: "pending_approval",
+        },
+      ];
+
+      setActiveStreams(allStreams.filter((s) => s.status === "active"));
+      setPendingStreams(
+        allStreams.filter((s) => s.status === "pending_approval"),
+      );
 
       setIsLoading(false);
     };
@@ -67,6 +86,7 @@ export const usePayroll = () => {
     totalLiabilities,
     activeStreamsCount: activeStreams.length,
     activeStreams,
+    pendingStreams,
     isLoading,
   };
 };

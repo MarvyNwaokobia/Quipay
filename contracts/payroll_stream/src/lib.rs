@@ -20,6 +20,7 @@ pub enum StreamStatus {
     Active = 0,
     Canceled = 1,
     Completed = 2,
+    PendingApproval = 3,
 }
 
 #[contracttype]
@@ -28,6 +29,13 @@ pub enum StreamKey {
     Stream(u64),
     EmployerStreams(Address),
     WorkerStreams(Address),
+    EmployerSettings(Address),
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct EmployerSettings {
+    pub approval_threshold: i128,
 }
 
 #[contracttype]
@@ -123,6 +131,43 @@ impl PayrollStream {
         Ok(())
     }
 
+    pub fn set_employer_approval_threshold(
+        env: Env,
+        employer: Address,
+        threshold: i128,
+    ) -> Result<(), QuipayError> {
+        employer.require_auth();
+        if threshold < 0 {
+            return Err(QuipayError::InvalidAmount);
+        }
+
+        let settings = EmployerSettings {
+            approval_threshold: threshold,
+        };
+        env.storage()
+            .persistent()
+            .set(&StreamKey::EmployerSettings(employer.clone()), &settings);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "employer"),
+                Symbol::new(&env, "threshold_set"),
+                employer,
+            ),
+            threshold,
+        );
+
+        Ok(())
+    }
+
+    pub fn get_employer_approval_threshold(env: Env, employer: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get::<StreamKey, EmployerSettings>(&StreamKey::EmployerSettings(employer))
+            .map(|s| s.approval_threshold)
+            .unwrap_or(0)
+    }
+
     pub fn set_vault(env: Env, vault: Address) {
         let admin: Address = env
             .storage()
@@ -158,10 +203,23 @@ impl PayrollStream {
             end_ts,
         )?;
 
+        let stream_opt = Self::get_stream(env.clone(), stream_id);
+        let status = if let Some(s) = stream_opt {
+            s.status
+        } else {
+            StreamStatus::Active
+        };
+
+        let event_name = if status == StreamStatus::PendingApproval {
+            Symbol::new(&env, "pending_approval")
+        } else {
+            Symbol::new(&env, "created")
+        };
+
         env.events().publish(
             (
                 Symbol::new(&env, "stream"),
-                Symbol::new(&env, "created"),
+                event_name,
                 worker,
                 employer,
             ),
@@ -169,6 +227,94 @@ impl PayrollStream {
         );
 
         Ok(stream_id)
+    }
+
+    pub fn approve_stream(env: Env, stream_id: u64, approver: Address) -> Result<(), QuipayError> {
+        Self::require_not_paused(&env)?;
+        approver.require_auth();
+
+        let key = StreamKey::Stream(stream_id);
+        let mut stream: Stream = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(QuipayError::StreamNotFound)?;
+
+        if stream.status != StreamStatus::PendingApproval {
+            return Err(QuipayError::Custom); // Or a more specific error
+        }
+
+        // Only the employer or an authorized gatekeeper can approve
+        if stream.employer != approver {
+            let gateway_opt = Self::get_gateway(env.clone());
+            if let Some(gateway_addr) = gateway_opt {
+                let is_auth: bool = env.invoke_contract(
+                    &gateway_addr,
+                    &Symbol::new(&env, "is_authorized"),
+                    soroban_sdk::vec![
+                        &env,
+                        approver.clone().into_val(&env),
+                        4u32.into_val(&env), // Permission::CreateStream (reuse for approval)
+                    ],
+                );
+                if !is_auth {
+                    return Err(QuipayError::Unauthorized);
+                }
+            } else {
+                return Err(QuipayError::Unauthorized);
+            }
+        }
+
+        let now = env.ledger().timestamp();
+        // Check timeout (72 hours = 259,200 seconds)
+        if now > stream.created_at + 259_200 {
+            stream.status = StreamStatus::Canceled;
+            stream.closed_at = now;
+            env.storage().persistent().set(&key, &stream);
+
+            // Refund liability back to vault
+            let vault: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::Vault)
+                .ok_or(QuipayError::NotInitialized)?;
+
+            use soroban_sdk::{IntoVal, vec};
+            env.invoke_contract::<()>(
+                &vault,
+                &Symbol::new(&env, "remove_liability"),
+                vec![
+                    &env,
+                    stream.token.clone().into_val(&env),
+                    stream.total_amount.into_val(&env),
+                ],
+            );
+
+            env.events().publish(
+                (
+                    Symbol::new(&env, "stream"),
+                    Symbol::new(&env, "expired"),
+                    stream_id,
+                ),
+                (),
+            );
+            return Err(QuipayError::StreamExpired);
+        }
+
+        stream.status = StreamStatus::Active;
+        env.storage().persistent().set(&key, &stream);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "stream"),
+                Symbol::new(&env, "approved"),
+                stream_id,
+                approver,
+            ),
+            (),
+        );
+
+        Ok(())
     }
 
     pub fn withdraw(env: Env, stream_id: u64, worker: Address) -> Result<i128, QuipayError> {
@@ -184,6 +330,9 @@ impl PayrollStream {
 
         if stream.worker != worker {
             panic!("not worker");
+        }
+        if stream.status == StreamStatus::PendingApproval {
+            panic!("stream not approved");
         }
         if Self::is_closed(&stream) {
             panic!("stream closed");
@@ -262,6 +411,12 @@ impl PayrollStream {
             let plan = match env.storage().persistent().get::<StreamKey, Stream>(&key) {
                 Some(mut stream) => {
                     if stream.worker != caller {
+                        BatchWithdrawalPlan::Result(WithdrawResult {
+                            stream_id,
+                            amount: 0,
+                            success: false,
+                        })
+                    } else if stream.status == StreamStatus::PendingApproval {
                         BatchWithdrawalPlan::Result(WithdrawResult {
                             stream_id,
                             amount: 0,
@@ -686,6 +841,13 @@ impl PayrollStream {
             .instance()
             .set(&DataKey::NextStreamId, &next_id);
 
+        let threshold = Self::get_employer_approval_threshold(env.clone(), employer.clone());
+        let status = if threshold > 0 && total_amount > threshold {
+            StreamStatus::PendingApproval
+        } else {
+            StreamStatus::Active
+        };
+
         let stream = Stream {
             employer: employer.clone(),
             worker: worker.clone(),
@@ -697,7 +859,7 @@ impl PayrollStream {
             total_amount,
             withdrawn_amount: 0,
             last_withdrawal_ts: 0,
-            status: StreamStatus::Active,
+            status,
             created_at: now,
             closed_at: 0,
         };
@@ -724,10 +886,16 @@ impl PayrollStream {
         wrk_ids.push_back(stream_id);
         env.storage().persistent().set(&wrk_key, &wrk_ids);
 
+        let event_name = if status == StreamStatus::PendingApproval {
+            Symbol::new(&env, "pending_approval")
+        } else {
+            Symbol::new(&env, "created_via_gateway")
+        };
+
         env.events().publish(
             (
                 Symbol::new(&env, "stream"),
-                Symbol::new(&env, "created_via_gateway"),
+                event_name,
                 worker.clone(),
                 employer.clone(),
             ),

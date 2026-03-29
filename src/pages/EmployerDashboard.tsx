@@ -29,6 +29,7 @@ const EmployerDashboard: React.FC = () => {
     totalLiabilities,
     activeStreamsCount,
     activeStreams,
+    pendingStreams,
     isLoading,
   } = usePayroll();
   const navigate = useNavigate();
@@ -180,6 +181,59 @@ const EmployerDashboard: React.FC = () => {
             </Text>
           </div>
         </div>
+
+        {pendingStreams.length > 0 && (
+          <div className={tw.streamsSection}>
+            <div className={tw.streamsHeader}>
+              <Text as="h2" size="lg" style={{ color: "#EAB308" }}>
+                Approvals Required ({pendingStreams.length})
+              </Text>
+            </div>
+            <div className={tw.streamsList}>
+              {pendingStreams.map((stream) => (
+                <div
+                  key={stream.id}
+                  className={tw.streamItem}
+                  style={{ borderLeft: "4px solid #EAB308" }}
+                >
+                  <div>
+                    <Text as="div" size="md" weight="bold">
+                      {stream.employeeName}
+                    </Text>
+                    <Text as="div" size="sm" style={{ color: "var(--muted)" }}>
+                      {stream.employeeAddress}
+                    </Text>
+                  </div>
+                  <div>
+                    <Text as="div" size="sm">
+                      Rate: {stream.flowRate} {stream.tokenSymbol}/sec
+                    </Text>
+                  </div>
+                  <div style={{ display: "flex", gap: "10px" }}>
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      onClick={() => {
+                        alert(`Approving stream ${stream.id}...`);
+                      }}
+                    >
+                      Approve
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => {
+                        alert(`Rejecting stream ${stream.id}...`);
+                      }}
+                    >
+                      Reject
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         <div className={tw.streamsSection}>
           <div className={tw.streamsHeader}>
