@@ -83,9 +83,22 @@ pub enum StreamKey {
     EmployerSettings(Address),
 }
 
+/// Per-employer configuration for the multi-signature approval workflow.
+///
+/// When `approval_threshold` is set to a value greater than 0, any stream whose
+/// `total_amount` exceeds that threshold will be created in the `PendingApproval`
+/// state rather than the `Active` state.  The stream will only begin streaming
+/// once the employer (or an authorised gateway agent) calls `approve_stream`.
+///
+/// Setting `approval_threshold` to `0` disables the workflow — all streams are
+/// created `Active` immediately (the default behaviour).
+///
+/// Stored in persistent storage under `StreamKey::EmployerSettings(employer)`.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct EmployerSettings {
+    /// Minimum total stream value (in token stroops) that requires a secondary
+    /// approval step before the stream becomes active.  Zero means no threshold.
     pub approval_threshold: i128,
 }
 

@@ -2681,3 +2681,157 @@ fn test_extend_stream_min_duration_enforced() {
     // Extending to 11100 is fine
     client.extend_stream(&s2, &0i128, &10100u64);
 }
+
+// ─── Multi-sig / PendingApproval tests ──────────────────────────────────────
+
+#[test]
+fn test_stream_below_threshold_is_active_immediately() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| li.timestamp = 0);
+    let (client, employer, worker, token, _) = setup(&env);
+
+    // Threshold = 1_000_000; stream total = 100 * 100 = 10_000 < threshold
+    client.set_employer_approval_threshold(&employer, &1_000_000);
+    let stream_id = client.create_stream(&employer, &worker, &token, &100, &0, &0, &100, &None, &None);
+
+    let stream = client.get_stream(&stream_id).unwrap();
+    assert_eq!(stream.status, StreamStatus::Active);
+}
+
+#[test]
+fn test_stream_above_threshold_is_pending_approval() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| li.timestamp = 0);
+    let (client, employer, worker, token, _) = setup(&env);
+
+    // Threshold = 500; stream total = 100 * 100 = 10_000 > threshold
+    client.set_employer_approval_threshold(&employer, &500);
+    let stream_id = client.create_stream(&employer, &worker, &token, &100, &0, &0, &100, &None, &None);
+
+    let stream = client.get_stream(&stream_id).unwrap();
+    assert_eq!(stream.status, StreamStatus::PendingApproval);
+}
+
+#[test]
+fn test_approve_stream_by_employer_activates_stream() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| li.timestamp = 0);
+    let (client, employer, worker, token, _) = setup(&env);
+
+    client.set_employer_approval_threshold(&employer, &500);
+    let stream_id = client.create_stream(&employer, &worker, &token, &100, &0, &0, &100, &None, &None);
+
+    // Confirm pending before approval
+    let before = client.get_stream(&stream_id).unwrap();
+    assert_eq!(before.status, StreamStatus::PendingApproval);
+
+    client.approve_stream(&stream_id, &employer);
+
+    let after = client.get_stream(&stream_id).unwrap();
+    assert_eq!(after.status, StreamStatus::Active);
+}
+
+#[test]
+fn test_approve_stream_not_found_returns_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, employer, _, _, _) = setup(&env);
+
+    let res = client.try_approve_stream(&9999u64, &employer);
+    assert_eq!(res, Err(Ok(QuipayError::StreamNotFound)));
+}
+
+#[test]
+fn test_approve_stream_already_active_returns_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| li.timestamp = 0);
+    let (client, employer, worker, token, _) = setup(&env);
+
+    // No threshold → stream is Active immediately
+    let stream_id = client.create_stream(&employer, &worker, &token, &100, &0, &0, &100, &None, &None);
+    let stream = client.get_stream(&stream_id).unwrap();
+    assert_eq!(stream.status, StreamStatus::Active);
+
+    // Approving an already-Active stream should return Custom error
+    let res = client.try_approve_stream(&stream_id, &employer);
+    assert!(res.is_err());
+}
+
+#[test]
+fn test_approve_stream_expired_timeout_cancels_stream() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| li.timestamp = 0);
+    let (client, employer, worker, token, _) = setup(&env);
+
+    client.set_employer_approval_threshold(&employer, &500);
+    let stream_id = client.create_stream(&employer, &worker, &token, &100, &0, &0, &100, &None, &None);
+
+    // Advance 72 hours + 1 second past creation (created_at = 0)
+    env.ledger().with_mut(|li| li.timestamp = 259_201);
+
+    let res = client.try_approve_stream(&stream_id, &employer);
+    assert_eq!(res, Err(Ok(QuipayError::StreamExpired)));
+
+    // Stream should be Canceled after timeout
+    let stream = client.get_stream(&stream_id).unwrap();
+    assert_eq!(stream.status, StreamStatus::Canceled);
+}
+
+#[test]
+fn test_pending_approval_stream_blocks_withdraw() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| li.timestamp = 0);
+    let (client, employer, worker, token, _) = setup(&env);
+
+    client.set_employer_approval_threshold(&employer, &500);
+    let stream_id = client.create_stream(&employer, &worker, &token, &100, &0, &0, &100, &None, &None);
+
+    // Advance past start so the stream would normally have accrued value
+    env.ledger().with_mut(|li| li.timestamp = 50);
+
+    // Withdraw should return 0 for a PendingApproval stream
+    let withdrawn = client.withdraw(&stream_id, &worker);
+    assert_eq!(withdrawn, 0);
+}
+
+#[test]
+fn test_set_approval_threshold_zero_disables_workflow() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| li.timestamp = 0);
+    let (client, employer, worker, token, _) = setup(&env);
+
+    // First enable, then disable threshold
+    client.set_employer_approval_threshold(&employer, &500);
+    client.set_employer_approval_threshold(&employer, &0);
+
+    let stream_id = client.create_stream(&employer, &worker, &token, &100, &0, &0, &100, &None, &None);
+    let stream = client.get_stream(&stream_id).unwrap();
+    assert_eq!(stream.status, StreamStatus::Active);
+}
+
+#[test]
+fn test_get_employer_approval_threshold_default_is_zero() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, employer, _, _, _) = setup(&env);
+
+    // No threshold set → should default to 0
+    assert_eq!(client.get_employer_approval_threshold(&employer), 0);
+}
+
+#[test]
+fn test_set_approval_threshold_negative_returns_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, employer, _, _, _) = setup(&env);
+
+    let res = client.try_set_employer_approval_threshold(&employer, &-1);
+    assert_eq!(res, Err(Ok(QuipayError::InvalidAmount)));
+}
